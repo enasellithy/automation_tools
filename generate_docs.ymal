@@ -1,0 +1,127 @@
+name: 📘 AI Legacy Docs Crawler
+
+on:
+  push:
+    branches: [ main, dev1 ]
+  workflow_dispatch: # Allows manual triggering to process legacy code faster
+
+permissions:
+  contents: write # Permission to commit generated docs back to the repo
+
+jobs:
+  generate-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      # Persistent cache ensures we don't redownload the AI model every time
+      - name: 💾 Persistent AI Model Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ollama
+            .ai_docs_tracker.txt
+          key: ai-docs-permanent-v1
+          restore-keys: |
+            ai-docs-permanent-
+
+      # Install Ollama runner - The engine behind our local AI
+      - name: 🦙 Setup Ollama Environment
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve & 
+          until curl -s localhost:11434 > /dev/null; do sleep 1; done
+          ollama pull qwen2.5-coder:1.5b
+
+      - name: 🐍 Setup Python Runtime
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 📦 Install Dependencies
+        run: pip install requests
+
+      - name: 🤖 Intelligent Documentation Engine
+        run: |
+          python << 'EOF'
+          import os, requests
+
+          # Configuration Constants
+          MODEL = "qwen2.5-coder:1.5b"
+          TRACKER = ".ai_docs_tracker.txt"
+          OUTPUT_FILE = "TECHNICAL_DOCS.md"
+          BATCH_SIZE = 5 # Number of files to process per run to optimize performance
+          
+          # Target directories for legacy code documentation
+          TARGET_PATHS = ["app/Facades/", "app/"]
+
+          # Load previously processed files to prevent duplicates
+          processed = set()
+          if os.path.exists(TRACKER):
+              with open(TRACKER, 'r', encoding='utf-8') as f:
+                  processed = set(line.strip() for line in f)
+
+          # Collect all PHP files from target paths
+          queue = []
+          for target in TARGET_PATHS:
+              if os.path.isdir(target):
+                  for root, _, files in os.walk(target):
+                      for f in files:
+                          if f.endswith(".php"): queue.append(os.path.join(root, f))
+              elif os.path.isfile(target): queue.append(target)
+
+          new_content = ""
+          just_processed = []
+
+          # Start AI Analysis loop
+          for path in queue:
+              if path not in processed:
+                  print(f"🧠 AI Analyzing: {path}")
+                  try:
+                      with open(path, 'r', encoding='utf-8') as f:
+                          snippet = f.read()[:3000] # Analyze first 3k chars for speed
+
+                      # Payload optimized for table generation
+                      payload = {
+                          "model": MODEL,
+                          "prompt": f"Generate a technical Markdown table (Method, Parameters, Purpose) for this PHP code. Table only:\n\n{snippet}",
+                          "stream": False,
+                          "options": {"num_predict": 500, "temperature": 0}
+                      }
+                      
+                      response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=120)
+
+                      if response.status_code == 200:
+                          markdown_table = response.json().get('response', '')
+                          new_content += f"\n### 📄 Source: {path}\n{markdown_table}\n"
+                          just_processed.append(path)
+
+                      if len(just_processed) >= BATCH_SIZE: break
+                  except Exception as e:
+                      print(f"❌ Error processing {path}: {e}")
+
+          # Update the documentation file and the tracker
+          if just_processed:
+              title = "# 📘 Technical System Documentation\n\n"
+              old_docs = ""
+              if os.path.exists(OUTPUT_FILE):
+                  with open(OUTPUT_FILE, 'r', encoding='utf-8') as f: 
+                      old_docs = f.read().replace(title, "")
+              
+              with open(OUTPUT_FILE, 'w', encoding='utf-8') as f: 
+                  f.write(title + new_content + "\n---\n" + old_docs)
+                  
+              with open(TRACKER, 'a', encoding='utf-8') as f:
+                  for p in just_processed: f.write(p + "\n")
+              print(f"✅ Successfully updated {len(just_processed)} files.")
+          EOF
+
+      # Sync changes back to the repository
+      - name: 📤 Commit and Push Updates
+        run: |
+          git config --global user.name 'AI Docs Bot'
+          git config --global user.email 'ai-bot@bot.com'
+          git add TECHNICAL_DOCS.md .ai_docs_tracker.txt
+          git commit -m "docs: AI automated technical update [skip ci]" || exit 0
+          git push
